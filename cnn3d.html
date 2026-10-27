@@ -1,0 +1,770 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3D CNN Visualizer Naufal Al - Harith</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:rgba(16,22,30,.9); --line:#263241; --fg:#d7dee7; --dim:#8b9bad;
+    --acc:#f0a04b; --neg:#5aa9ff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+  #scene{position:fixed;inset:0}
+  #scene canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+  #scene canvas:active{cursor:grabbing}
+  #panel{position:fixed;left:12px;top:12px;width:300px;max-width:calc(100% - 24px);max-height:calc(100% - 24px);overflow:auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;backdrop-filter:blur(6px)}
+  #panel header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  h1{font-size:15px;margin:0}
+  h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:14px 0 6px}
+  p{margin:8px 0}
+  .dim{color:var(--dim)}
+  button,.btn{font:inherit;color:var(--fg);background:#18212c;border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+  button:hover:not(:disabled),.btn:hover{border-color:var(--acc)}
+  button:disabled{opacity:.45;cursor:default}
+  button:focus-visible,input:focus-visible,.btn:focus-within{outline:2px solid var(--acc);outline-offset:1px}
+  #draw{display:block;width:200px;height:200px;max-width:100%;background:#000;border:1px solid var(--line);border-radius:6px;touch-action:none;cursor:crosshair}
+  #small{width:56px;height:56px;image-rendering:pixelated;border:1px solid var(--line);background:#000}
+  .row{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
+  #guess div{display:flex;justify-content:space-between;gap:8px}
+  #guess b{font-variant-numeric:tabular-nums}
+  #teach{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+  #teach button{width:26px;padding:3px 0;text-align:center}
+  progress{width:100%;height:6px;accent-color:var(--acc)}
+  #layers label,.opt{display:flex;align-items:center;gap:8px;padding:1px 0;cursor:pointer}
+  input[type=file]{display:none}
+  #tip{position:fixed;pointer-events:none;background:#000c;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;display:none;white-space:nowrap;z-index:5;font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:12px;color:var(--dim);font-size:12px}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  @media (max-width:640px){#panel{width:calc(100% - 24px)}}
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<div id="tip"></div>
+
+<aside id="panel">
+  <header>
+    <h1>3D CNN Visualizer</h1>
+    <button id="fold" aria-label="Collapse panel" aria-expanded="true">&minus;</button>
+  </header>
+  <div id="body">
+    <p class="dim">Draw a digit. Every layer of the network updates live in 3D. Drag to orbit, wheel to zoom, Shift+drag to pan, hover any map or unit for its value.</p>
+    <canvas id="draw" width="280" height="280"></canvas>
+    <div class="row">
+      <button id="clear">Clear</button>
+      <span class="dim">28&times;28 input</span>
+      <canvas id="small" width="28" height="28"></canvas>
+    </div>
+
+    <h2>Prediction</h2>
+    <div id="guess"><div><span>First guess</span><b>&ndash;</b></div><div><span>Second guess</span><b>&ndash;</b></div></div>
+
+    <h2>Correct it</h2>
+    <div class="dim">This drawing is a</div>
+    <div id="teach"></div>
+    <div id="taught" class="dim"></div>
+
+    <h2>Training</h2>
+    <div id="status" class="dim">Starting&hellip;</div>
+    <progress id="prog" max="1" value="0"></progress>
+    <div class="row">
+      <button id="retrain">Retrain</button>
+      <label class="btn">Load weights (.json)<input type="file" id="wfile" accept=".json,application/json"></label>
+    </div>
+
+    <h2>Layers</h2>
+    <div id="layers"></div>
+    <label class="opt"><input type="checkbox" id="conn" checked> Connections</label>
+    <div class="legend"><span><i class="sw" style="background:var(--acc)"></i>excitatory</span><span><i class="sw" style="background:var(--neg)"></i>inhibitory</span></div>
+  </div>
+</aside>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script>
+/* CNN-BEGIN -------------------------------------------------------------
+   28x28 -> conv5x5(4) -> pool2 -> conv5x5(8) -> pool2 -> fc(32) -> fc(10)
+   Plain Float32Array implementation with forward and backward passes. */
+const K1 = 4, K2 = 8, H = 32, NC = 10;
+
+function rng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function gauss(r) {
+  let u = 0;
+  while (!u) u = r();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r());
+}
+function initNet(seed) {
+  const r = rng(seed);
+  const mk = (n, fanIn) => {
+    const a = new Float32Array(n), s = Math.sqrt(2 / fanIn);
+    for (let i = 0; i < n; i++) a[i] = gauss(r) * s;
+    return a;
+  };
+  return {
+    w1: mk(K1 * 25, 25),          b1: new Float32Array(K1),
+    w2: mk(K2 * K1 * 25, K1 * 25), b2: new Float32Array(K2),
+    w3: mk(H * K2 * 16, K2 * 16),  b3: new Float32Array(H),
+    w4: mk(NC * H, H),            b4: new Float32Array(NC)
+  };
+}
+function newGrad(net) {
+  const g = {};
+  for (const k in net) g[k] = new Float32Array(net[k].length);
+  return g;
+}
+function newCache() {
+  return {
+    x: null,
+    c1: new Float32Array(K1 * 576), p1: new Float32Array(K1 * 144), i1: new Int32Array(K1 * 144),
+    c2: new Float32Array(K2 * 64),  p2: new Float32Array(K2 * 16),  i2: new Int32Array(K2 * 16),
+    h: new Float32Array(H), z: new Float32Array(NC), p: new Float32Array(NC)
+  };
+}
+function pool(src, dst, idx, maps, size) {
+  const o = size >> 1;
+  for (let m = 0; m < maps; m++)
+    for (let y = 0; y < o; y++)
+      for (let x = 0; x < o; x++) {
+        const base = m * size * size + 2 * y * size + 2 * x;
+        let best = base, bv = src[base], c;
+        c = base + 1;        if (src[c] > bv) { bv = src[c]; best = c; }
+        c = base + size;     if (src[c] > bv) { bv = src[c]; best = c; }
+        c = base + size + 1; if (src[c] > bv) { bv = src[c]; best = c; }
+        const d = m * o * o + y * o + x;
+        dst[d] = bv; idx[d] = best;
+      }
+}
+function forward(n, x, c) {
+  c.x = x;
+  for (let f = 0; f < K1; f++) {
+    const wo = f * 25, co = f * 576;
+    for (let y = 0; y < 24; y++)
+      for (let xx = 0; xx < 24; xx++) {
+        let s = n.b1[f];
+        for (let i = 0; i < 5; i++) {
+          const xo = (y + i) * 28 + xx, wi = wo + i * 5;
+          for (let j = 0; j < 5; j++) s += n.w1[wi + j] * x[xo + j];
+        }
+        c.c1[co + y * 24 + xx] = s > 0 ? s : 0;
+      }
+  }
+  pool(c.c1, c.p1, c.i1, K1, 24);
+  for (let g = 0; g < K2; g++)
+    for (let y = 0; y < 8; y++)
+      for (let xx = 0; xx < 8; xx++) {
+        let s = n.b2[g];
+        for (let f = 0; f < K1; f++) {
+          const wo = (g * K1 + f) * 25, po = f * 144;
+          for (let i = 0; i < 5; i++) {
+            const pi = po + (y + i) * 12 + xx, wi = wo + i * 5;
+            for (let j = 0; j < 5; j++) s += n.w2[wi + j] * c.p1[pi + j];
+          }
+        }
+        c.c2[g * 64 + y * 8 + xx] = s > 0 ? s : 0;
+      }
+  pool(c.c2, c.p2, c.i2, K2, 8);
+  const M = K2 * 16;
+  for (let k = 0; k < H; k++) {
+    let s = n.b3[k];
+    const wo = k * M;
+    for (let m = 0; m < M; m++) s += n.w3[wo + m] * c.p2[m];
+    c.h[k] = s > 0 ? s : 0;
+  }
+  let mx = -Infinity;
+  for (let o = 0; o < NC; o++) {
+    let s = n.b4[o];
+    for (let k = 0; k < H; k++) s += n.w4[o * H + k] * c.h[k];
+    c.z[o] = s;
+    if (s > mx) mx = s;
+  }
+  let sum = 0;
+  for (let o = 0; o < NC; o++) { c.p[o] = Math.exp(c.z[o] - mx); sum += c.p[o]; }
+  for (let o = 0; o < NC; o++) c.p[o] /= sum;
+  return c.p;
+}
+// Adds the gradient of -log p[label] into G. Returns the loss.
+function backward(n, c, label, G) {
+  const M = K2 * 16;
+  const dz = new Float32Array(NC), dh = new Float32Array(H);
+  for (let o = 0; o < NC; o++) dz[o] = c.p[o] - (o === label ? 1 : 0);
+  for (let o = 0; o < NC; o++) {
+    G.b4[o] += dz[o];
+    for (let k = 0; k < H; k++) {
+      G.w4[o * H + k] += dz[o] * c.h[k];
+      dh[k] += n.w4[o * H + k] * dz[o];
+    }
+  }
+  const dp2 = new Float32Array(M);
+  for (let k = 0; k < H; k++) {
+    if (c.h[k] <= 0) continue;
+    const d = dh[k];
+    G.b3[k] += d;
+    for (let m = 0; m < M; m++) {
+      G.w3[k * M + m] += d * c.p2[m];
+      dp2[m] += n.w3[k * M + m] * d;
+    }
+  }
+  const dc2 = new Float32Array(K2 * 64);
+  for (let m = 0; m < M; m++) dc2[c.i2[m]] += dp2[m];
+  const dp1 = new Float32Array(K1 * 144);
+  for (let g = 0; g < K2; g++)
+    for (let y = 0; y < 8; y++)
+      for (let x = 0; x < 8; x++) {
+        const q = g * 64 + y * 8 + x;
+        if (c.c2[q] <= 0) continue;
+        const d = dc2[q];
+        if (!d) continue;
+        G.b2[g] += d;
+        for (let f = 0; f < K1; f++) {
+          const wo = (g * K1 + f) * 25, po = f * 144;
+          for (let i = 0; i < 5; i++) {
+            const pi = po + (y + i) * 12 + x, wi = wo + i * 5;
+            for (let j = 0; j < 5; j++) {
+              G.w2[wi + j] += d * c.p1[pi + j];
+              dp1[pi + j] += n.w2[wi + j] * d;
+            }
+          }
+        }
+      }
+  const dc1 = new Float32Array(K1 * 576);
+  for (let m = 0; m < K1 * 144; m++) dc1[c.i1[m]] += dp1[m];
+  for (let f = 0; f < K1; f++)
+    for (let y = 0; y < 24; y++)
+      for (let x = 0; x < 24; x++) {
+        const q = f * 576 + y * 24 + x;
+        if (c.c1[q] <= 0) continue;
+        const d = dc1[q];
+        if (!d) continue;
+        G.b1[f] += d;
+        for (let i = 0; i < 5; i++) {
+          const xo = (y + i) * 28 + x, wi = f * 25 + i * 5;
+          for (let j = 0; j < 5; j++) G.w1[wi + j] += d * c.x[xo + j];
+        }
+      }
+  return -Math.log(Math.max(c.p[label], 1e-9));
+}
+function sgd(net, G, V, lr, bs) {
+  for (const k in net) {
+    const w = net[k], g = G[k], v = V[k];
+    for (let i = 0; i < w.length; i++) {
+      v[i] = 0.9 * v[i] - lr * g[i] / bs;
+      w[i] += v[i];
+      g[i] = 0;
+    }
+  }
+}
+/* CNN-END ---------------------------------------------------------------- */
+
+const $ = s => document.querySelector(s);
+const tick = () => new Promise(r => setTimeout(r));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/* ---------- Image preprocessing (MNIST-style: fit in 20x20, centre by mass) ---------- */
+function preprocess(src) {
+  const w = src.width, h = src.height;
+  const sc = src.getContext('2d', { willReadFrequently: true });
+  const d = sc.getImageData(0, 0, w, h).data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (d[(y * w + x) * 4] > 40) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+  if (x1 < 0) return null;
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1, s = 20 / Math.max(bw, bh);
+  const dw = Math.max(1, bw * s), dh = Math.max(1, bh * s);
+  const t = preprocess.t || (preprocess.t = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 28; return c;
+  })());
+  const tc = t.getContext('2d', { willReadFrequently: true });
+  tc.fillStyle = '#000'; tc.fillRect(0, 0, 28, 28);
+  tc.imageSmoothingEnabled = true; tc.imageSmoothingQuality = 'high';
+  tc.drawImage(src, x0, y0, bw, bh, (28 - dw) / 2, (28 - dh) / 2, dw, dh);
+  const im = tc.getImageData(0, 0, 28, 28).data;
+  let m = 0, cx = 0, cy = 0;
+  for (let y = 0; y < 28; y++)
+    for (let x = 0; x < 28; x++) {
+      const v = im[(y * 28 + x) * 4]; m += v; cx += v * x; cy += v * y;
+    }
+  if (!m) return null;
+  const sx = Math.round(14 - cx / m), sy = Math.round(14 - cy / m);
+  const out = new Float32Array(784);
+  for (let y = 0; y < 28; y++)
+    for (let x = 0; x < 28; x++) {
+      const nx = x - sx, ny = y - sy;
+      if (nx >= 0 && nx < 28 && ny >= 0 && ny < 28) out[y * 28 + x] = im[(ny * 28 + nx) * 4] / 255;
+    }
+  return out;
+}
+
+/* ---------- Synthetic digits (font-rendered, randomly distorted) ---------- */
+const FONTS = ['Arial', 'Helvetica', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana',
+  'Trebuchet MS', 'Comic Sans MS', 'Tahoma', 'Palatino', 'Impact', 'sans-serif', 'serif', 'monospace', 'cursive'];
+const rcv = document.createElement('canvas'); rcv.width = rcv.height = 112;
+const rctx = rcv.getContext('2d', { willReadFrequently: true });
+function renderDigit(d, r) {
+  rctx.setTransform(1, 0, 0, 1, 0, 0);
+  rctx.fillStyle = '#000'; rctx.fillRect(0, 0, 112, 112);
+  rctx.save();
+  rctx.translate(56 + (r() - .5) * 10, 56 + (r() - .5) * 10);
+  rctx.rotate((r() - .5) * 0.5);
+  rctx.transform(1, 0, (r() - .5) * 0.6, 1, 0, 0);
+  rctx.scale(0.75 + r() * 0.5, 0.85 + r() * 0.35);
+  const f = FONTS[(r() * FONTS.length) | 0];
+  rctx.font = `${r() < 0.4 ? 'bold ' : ''}${70 + ((r() * 24) | 0)}px ${f.includes(' ') ? '"' + f + '"' : f}, sans-serif`;
+  rctx.textAlign = 'center'; rctx.textBaseline = 'middle';
+  rctx.fillStyle = '#fff'; rctx.fillText(String(d), 0, 4);
+  const lw = r() * 6;
+  if (lw > 1.5) { rctx.strokeStyle = '#fff'; rctx.lineWidth = lw; rctx.lineJoin = 'round'; rctx.strokeText(String(d), 0, 4); }
+  rctx.restore();
+  return preprocess(rcv);
+}
+
+/* ---------- State ---------- */
+let net = initNet(7), cache = newCache();
+let curX = new Float32Array(784);
+let trained = false, runToken = 0;
+const custom = [];          // user-labelled drawings
+let trainSet = null;        // { X, Y } kept for fine-tuning
+
+/* ---------- Layer layout ---------- */
+const U = 0.09; // world units per pixel
+const LAYERS = [
+  { id: 'input', name: 'Input',          maps: 1, size: 28, x: 0,    grid: [1, 1] },
+  { id: 'conv1', name: 'Convolution 1',  maps: K1, size: 24, x: 6,   grid: [2, 2] },
+  { id: 'pool1', name: 'Downsampling 1', maps: K1, size: 12, x: 11,  grid: [2, 2] },
+  { id: 'conv2', name: 'Convolution 2',  maps: K2, size: 8,  x: 15.5, grid: [4, 2] },
+  { id: 'pool2', name: 'Downsampling 2', maps: K2, size: 4,  x: 19.5, grid: [4, 2] },
+  { id: 'fc1',   name: 'Fully connected', units: H,  x: 23.5, cols: 4, step: 0.34, box: 0.24 },
+  { id: 'out',   name: 'Output',         units: NC, x: 27.5, cols: 1, step: 0.55, box: 0.4 }
+];
+
+/* ---------- Three.js scene ---------- */
+const sceneEl = $('#scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+sceneEl.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0f14);
+const cam = new THREE.PerspectiveCamera(45, 1, 0.1, 300);
+const target = new THREE.Vector3(13.8, 0, 0);
+let az = 2.39, pol = 1.27, dist = 30;
+
+function placeCam() {
+  const sp = Math.sin(pol);
+  cam.position.set(target.x + dist * sp * Math.cos(az), target.y + dist * Math.cos(pol), target.z + dist * sp * Math.sin(az));
+  cam.lookAt(target);
+}
+function resize() {
+  const w = sceneEl.clientWidth, h = sceneEl.clientHeight;
+  renderer.setSize(w, h);
+  cam.aspect = w / h; cam.updateProjectionMatrix();
+}
+function sprite(text, h, color) {
+  const cv = document.createElement('canvas'), cx = cv.getContext('2d');
+  const font = '600 44px system-ui, sans-serif';
+  cx.font = font;
+  const w = Math.ceil(cx.measureText(text).width) + 16;
+  cv.width = w; cv.height = 64;
+  cx.font = font; cx.fillStyle = color; cx.textAlign = 'center'; cx.textBaseline = 'middle';
+  cx.fillText(text, w / 2, 34);
+  const tex = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sp.scale.set(h * w / 64, h, 1);
+  sp.renderOrder = 10;
+  return sp;
+}
+
+const pickables = [];
+LAYERS.forEach((L, li) => {
+  const group = new THREE.Group();
+  scene.add(group);
+  L.group = group; L.pos = [];
+  if (L.maps) {
+    const cell = L.size * U, step = cell + 0.35, [cols, rows] = L.grid;
+    L.cv = []; L.ctx = []; L.img = []; L.tex = [];
+    for (let m = 0; m < L.maps; m++) {
+      const col = m % cols, row = Math.floor(m / cols);
+      const z = (col - (cols - 1) / 2) * step, y = ((rows - 1) / 2 - row) * step;
+      const cv = document.createElement('canvas'); cv.width = cv.height = L.size;
+      const cx = cv.getContext('2d');
+      const img = cx.createImageData(L.size, L.size);
+      for (let p = 3; p < img.data.length; p += 4) img.data[p] = 255;
+      cx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(cv);
+      tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false;
+      const geo = new THREE.PlaneGeometry(cell, cell);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+      mesh.rotation.y = -Math.PI / 2; mesh.position.set(L.x, y, z);
+      mesh.userData = { li, m };
+      group.add(mesh); pickables.push(mesh);
+      const edge = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0x3a4757 }));
+      edge.rotation.y = -Math.PI / 2; edge.position.copy(mesh.position);
+      group.add(edge);
+      L.cv.push(cv); L.ctx.push(cx); L.img.push(img); L.tex.push(tex);
+      L.pos.push(mesh.position.clone());
+    }
+    L.top = ((rows - 1) / 2) * step + cell / 2;
+  } else {
+    const rows = Math.ceil(L.units / L.cols);
+    L.mesh = [];
+    for (let k = 0; k < L.units; k++) {
+      const col = k % L.cols, row = Math.floor(k / L.cols);
+      const z = (col - (L.cols - 1) / 2) * L.step, y = ((rows - 1) / 2 - row) * L.step;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(L.box, L.box, L.box), new THREE.MeshBasicMaterial({ color: 0x1a222c }));
+      mesh.position.set(L.x, y, z);
+      mesh.userData = { li, k };
+      group.add(mesh); pickables.push(mesh);
+      L.mesh.push(mesh); L.pos.push(mesh.position.clone());
+      if (L.id === 'out') {
+        const t = sprite(String(k), 0.42, '#9fb1c4');
+        t.position.set(L.x + 0.75, y, z);
+        group.add(t);
+      }
+    }
+    L.top = ((rows - 1) / 2) * L.step + L.box / 2;
+  }
+  const title = sprite(L.name, 0.5, '#d7dee7');
+  title.position.set(L.x, L.top + 0.65, 0);
+  group.add(title);
+});
+
+/* ---------- Connections ---------- */
+function makeLines(pairs) {
+  const pos = new Float32Array(pairs.length * 6), col = new Float32Array(pairs.length * 6);
+  pairs.forEach(([a, b], i) => pos.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mesh = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+    vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+  scene.add(mesh);
+  return { mesh, col, attr: g.attributes.color, n: pairs.length };
+}
+function allPairs(a, b) {
+  const out = [];
+  LAYERS[a].pos.forEach(p => LAYERS[b].pos.forEach(q => out.push([p, q])));
+  return out;
+}
+function onePairs(a, b) { return LAYERS[a].pos.map((p, i) => [p, LAYERS[b].pos[i]]); }
+function paintStatic(set, r, g, b) {
+  for (let i = 0; i < set.n * 2; i++) { set.col[i * 3] = r; set.col[i * 3 + 1] = g; set.col[i * 3 + 2] = b; }
+  set.attr.needsUpdate = true;
+}
+const conns = [
+  { src: 0, dst: 1, set: makeLines(allPairs(0, 1)) },
+  { src: 1, dst: 2, set: makeLines(onePairs(1, 2)) },
+  { src: 2, dst: 3, set: makeLines(allPairs(2, 3)) },
+  { src: 3, dst: 4, set: makeLines(onePairs(3, 4)) },
+  { src: 4, dst: 5, set: makeLines(allPairs(4, 5)), weighted: true },   // index = map * H + unit
+  { src: 5, dst: 6, set: makeLines(allPairs(5, 6)), weighted: true }    // index = unit * NC + digit
+];
+conns.forEach(c => { if (!c.weighted) paintStatic(c.set, 0.09, 0.13, 0.19); });
+
+function paintWeighted(set, vals) {
+  let mx = 1e-9;
+  for (const v of vals) if (Math.abs(v) > mx) mx = Math.abs(v);
+  for (let i = 0; i < set.n; i++) {
+    const v = vals[i] / mx, a = Math.pow(Math.min(1, Math.abs(v)), 1.4) * 0.9;
+    const r = v > 0 ? 1.0 : 0.35, g = v > 0 ? 0.63 : 0.66, b = v > 0 ? 0.29 : 1.0;
+    for (let e = 0; e < 2; e++) {
+      const o = (i * 2 + e) * 3;
+      set.col[o] = r * a; set.col[o + 1] = g * a; set.col[o + 2] = b * a;
+    }
+  }
+  set.attr.needsUpdate = true;
+}
+
+/* ---------- Updating the visualisation ---------- */
+function paintLayer(L, data, fixedMax) {
+  const n = L.size * L.size;
+  let mx = fixedMax || 1e-6;
+  if (!fixedMax) for (let i = 0; i < data.length; i++) if (data[i] > mx) mx = data[i];
+  L.data = data; L.max = mx;
+  for (let m = 0; m < L.maps; m++) {
+    const d = L.img[m].data, o = m * n;
+    for (let p = 0; p < n; p++) {
+      const v = Math.round(255 * Math.min(1, data[o + p] / mx));
+      d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v;
+    }
+    L.ctx[m].putImageData(L.img[m], 0, 0);
+    L.tex[m].needsUpdate = true;
+  }
+}
+const colDark = new THREE.Color(0x1a222c), colHot = new THREE.Color(0xf0a04b), colWhite = new THREE.Color(0xe8eef5);
+function updateViz() {
+  const c = cache;
+  paintLayer(LAYERS[0], curX, 1);
+  paintLayer(LAYERS[1], c.c1); paintLayer(LAYERS[2], c.p1);
+  paintLayer(LAYERS[3], c.c2); paintLayer(LAYERS[4], c.p2);
+
+  const fc = LAYERS[5], out = LAYERS[6];
+  fc.data = c.h; out.data = c.p;
+  let mx = 1e-6;
+  for (let k = 0; k < H; k++) if (c.h[k] > mx) mx = c.h[k];
+  fc.max = mx;
+  for (let k = 0; k < H; k++) fc.mesh[k].material.color.copy(colDark).lerp(colWhite, c.h[k] / mx);
+  for (let k = 0; k < NC; k++) {
+    out.mesh[k].material.color.copy(colDark).lerp(colHot, c.p[k]);
+    out.mesh[k].scale.setScalar(0.85 + 0.9 * c.p[k]);
+  }
+  const M = K2 * 16, v4 = new Float32Array(K2 * H), v5 = new Float32Array(H * NC);
+  for (let m = 0; m < K2; m++)
+    for (let k = 0; k < H; k++) {
+      let s = 0;
+      for (let p = 0; p < 16; p++) s += net.w3[k * M + m * 16 + p] * c.p2[m * 16 + p];
+      v4[m * H + k] = s;
+    }
+  for (let k = 0; k < H; k++) for (let o = 0; o < NC; o++) v5[k * NC + o] = net.w4[o * H + k] * c.h[k];
+  paintWeighted(conns[4].set, v4);
+  paintWeighted(conns[5].set, v5);
+
+  const idx = Array.from(c.p, (p, i) => i).sort((a, b) => c.p[b] - c.p[a]);
+  $('#guess').innerHTML = ['First guess', 'Second guess'].map((t, i) =>
+    `<div><span>${t}</span><b>${hasInput() ? idx[i] + ' (' + (c.p[idx[i]] * 100).toFixed(1) + '%)' : '–'}</b></div>`).join('');
+}
+function hasInput() { for (let i = 0; i < 784; i++) if (curX[i] > 0) return true; return false; }
+function setInput(x) {
+  curX = x || new Float32Array(784);
+  const sc = $('#small').getContext('2d'), im = sc.createImageData(28, 28);
+  for (let i = 0; i < 784; i++) {
+    const v = Math.round(curX[i] * 255);
+    im.data[i * 4] = im.data[i * 4 + 1] = im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255;
+  }
+  sc.putImageData(im, 0, 0);
+  forward(net, curX, cache);
+  updateViz();
+}
+
+/* ---------- Camera controls ---------- */
+const dom = renderer.domElement;
+let dragging = false, lastX = 0, lastY = 0, panMode = false;
+dom.addEventListener('pointerdown', e => {
+  dragging = true; panMode = e.shiftKey || e.button === 2; lastX = e.clientX; lastY = e.clientY;
+  dom.setPointerCapture(e.pointerId); tip.style.display = 'none';
+});
+dom.addEventListener('pointermove', e => {
+  if (!dragging) return hover(e);
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (panMode) {
+    const f = new THREE.Vector3(); cam.getWorldDirection(f);
+    const right = f.clone().cross(cam.up).normalize(), up = right.clone().cross(f).normalize();
+    const k = dist * 0.0017;
+    target.addScaledVector(right, -dx * k).addScaledVector(up, dy * k);
+  } else {
+    az -= dx * 0.006; pol = clamp(pol - dy * 0.006, 0.12, 3.0);
+  }
+  placeCam();
+});
+const endDrag = () => { dragging = false; };
+dom.addEventListener('pointerup', endDrag);
+dom.addEventListener('pointercancel', endDrag);
+dom.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+dom.addEventListener('contextmenu', e => e.preventDefault());
+dom.addEventListener('wheel', e => {
+  e.preventDefault();
+  dist = clamp(dist * Math.exp(e.deltaY * 0.0012), 6, 90); placeCam();
+}, { passive: false });
+
+/* ---------- Hover tooltip ---------- */
+const tip = $('#tip'), ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+function hover(e) {
+  const r = dom.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(mouse, cam);
+  const hit = ray.intersectObjects(pickables.filter(o => o.parent.visible), false)[0];
+  if (!hit) { tip.style.display = 'none'; return; }
+  const { li, m, k } = hit.object.userData, L = LAYERS[li];
+  let txt;
+  if (L.maps) {
+    const px = Math.min(L.size - 1, Math.floor(hit.uv.x * L.size));
+    const py = Math.min(L.size - 1, Math.floor((1 - hit.uv.y) * L.size));
+    const v = L.data ? L.data[m * L.size * L.size + py * L.size + px] : 0;
+    txt = `${L.name} · map ${m + 1} · (${px}, ${py}) = ${v.toFixed(3)}`;
+  } else if (L.id === 'out') {
+    txt = `Digit ${k}: ${((L.data ? L.data[k] : 0) * 100).toFixed(1)}%`;
+  } else {
+    txt = `${L.name} · unit ${k + 1} = ${(L.data ? L.data[k] : 0).toFixed(3)}`;
+  }
+  tip.textContent = txt;
+  tip.style.display = 'block';
+  tip.style.left = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + 'px';
+  tip.style.top = (e.clientY + 14) + 'px';
+}
+
+/* ---------- Layer visibility ---------- */
+let connOn = true;
+function applyVis() {
+  LAYERS.forEach(L => { L.group.visible = L.chk.checked; });
+  conns.forEach(c => { c.set.mesh.visible = connOn && LAYERS[c.src].group.visible && LAYERS[c.dst].group.visible; });
+}
+LAYERS.forEach(L => {
+  const lab = document.createElement('label');
+  lab.innerHTML = `<input type="checkbox" checked> ${L.name}`;
+  L.chk = lab.firstElementChild;
+  L.chk.addEventListener('change', applyVis);
+  $('#layers').appendChild(lab);
+});
+$('#conn').addEventListener('change', e => { connOn = e.target.checked; applyVis(); });
+
+/* ---------- Drawing canvas ---------- */
+const dc = $('#draw'), dctx = dc.getContext('2d', { willReadFrequently: true });
+function clearDraw() { dctx.fillStyle = '#000'; dctx.fillRect(0, 0, 280, 280); }
+clearDraw();
+dctx.lineCap = 'round'; dctx.lineJoin = 'round'; dctx.lineWidth = 20; dctx.strokeStyle = '#fff'; dctx.fillStyle = '#fff';
+let drawing = false, last = null, pending = false;
+const pt = e => { const r = dc.getBoundingClientRect(); return [(e.clientX - r.left) * 280 / r.width, (e.clientY - r.top) * 280 / r.height]; };
+function schedule() {
+  if (pending) return;
+  pending = true;
+  requestAnimationFrame(() => { pending = false; setInput(preprocess(dc)); });
+}
+dc.addEventListener('pointerdown', e => {
+  drawing = true; last = pt(e); dc.setPointerCapture(e.pointerId);
+  dctx.beginPath(); dctx.arc(last[0], last[1], 10, 0, Math.PI * 2); dctx.fill();
+  schedule();
+});
+dc.addEventListener('pointermove', e => {
+  if (!drawing) return;
+  const p = pt(e);
+  dctx.beginPath(); dctx.moveTo(last[0], last[1]); dctx.lineTo(p[0], p[1]); dctx.stroke();
+  last = p; schedule();
+});
+const stopDraw = () => { drawing = false; };
+dc.addEventListener('pointerup', stopDraw);
+dc.addEventListener('pointercancel', stopDraw);
+$('#clear').addEventListener('click', () => { clearDraw(); setInput(null); });
+
+/* ---------- Training ---------- */
+function setStatus(t, p) {
+  $('#status').textContent = t;
+  if (p !== undefined) $('#prog').value = p;
+}
+function enableTeach(on) { document.querySelectorAll('#teach button').forEach(b => { b.disabled = !on; }); }
+function accuracy(n, X, Y) {
+  const c = newCache(); let ok = 0;
+  for (let i = 0; i < X.length; i++) {
+    const p = forward(n, X[i], c);
+    let b = 0; for (let o = 1; o < NC; o++) if (p[o] > p[b]) b = o;
+    if (b === Y[i]) ok++;
+  }
+  return ok / X.length;
+}
+async function trainNet() {
+  const token = ++runToken;
+  trained = false; enableTeach(false);
+  net = initNet(7);
+  setInput(curX);
+  const r = rng(99), N = 2000, T = 300, X = [], Y = [];
+  let t0 = performance.now();
+  for (let i = 0; X.length < N + T; i++) {
+    const d = i % 10, x = renderDigit(d, r);
+    if (x) { X.push(x); Y.push(d); }
+    if (performance.now() - t0 > 20) {
+      setStatus(`Generating training digits… ${X.length}/${N + T}`, X.length / (N + T) * 0.15);
+      await tick(); if (token !== runToken) return; t0 = performance.now();
+    }
+  }
+  const trX = X.slice(0, N), trY = Y.slice(0, N), teX = X.slice(N), teY = Y.slice(N);
+  trainSet = { X: trX, Y: trY };
+  const EP = 6, BS = 16, lrs = [0.01, 0.01, 0.006, 0.006, 0.003, 0.003];
+  const G = newGrad(net), V = newGrad(net), tc = newCache();
+  const idx = Array.from({ length: N }, (_, i) => i);
+  let steps = 0, total = EP * Math.ceil(N / BS);
+  t0 = performance.now();
+  for (let ep = 0; ep < EP; ep++) {
+    for (let i = N - 1; i > 0; i--) { const j = (r() * (i + 1)) | 0; [idx[i], idx[j]] = [idx[j], idx[i]]; }
+    let loss = 0, cnt = 0;
+    for (let b = 0; b < N; b += BS) {
+      const end = Math.min(N, b + BS);
+      for (let q = b; q < end; q++) {
+        forward(net, trX[idx[q]], tc);
+        loss += backward(net, tc, trY[idx[q]], G); cnt++;
+      }
+      sgd(net, G, V, lrs[ep], end - b);
+      steps++;
+      if (performance.now() - t0 > 25) {
+        setStatus(`Training: epoch ${ep + 1}/${EP}, loss ${(loss / cnt).toFixed(3)}`, 0.15 + 0.85 * steps / total);
+        await tick(); if (token !== runToken) return; t0 = performance.now();
+      }
+    }
+    const acc = accuracy(net, teX, teY);
+    setStatus(`Epoch ${ep + 1}/${EP} done, held-out accuracy ${(acc * 100).toFixed(1)}%`, 0.15 + 0.85 * steps / total);
+    setInput(curX);
+    await tick(); if (token !== runToken) return; t0 = performance.now();
+  }
+  trained = true; enableTeach(true);
+  const acc = accuracy(net, teX, teY);
+  setStatus(`Ready. Held-out accuracy ${(acc * 100).toFixed(1)}% on font-rendered digits. Handwriting may need corrections below.`, 1);
+  setInput(curX);
+}
+$('#retrain').addEventListener('click', () => { custom.length = 0; $('#taught').textContent = ''; trainNet(); });
+
+// Fine-tune on the user's own labelled drawings
+for (let d = 0; d < 10; d++) {
+  const b = document.createElement('button');
+  b.textContent = d; b.disabled = true;
+  b.addEventListener('click', async () => {
+    if (!trained || !hasInput()) return;
+    custom.push({ x: Float32Array.from(curX), y: d });
+    $('#taught').textContent = `Learned from ${custom.length} of your drawing${custom.length > 1 ? 's' : ''}.`;
+    enableTeach(false);
+    const G = newGrad(net), V = newGrad(net), tc = newCache(), n = trainSet.X.length;
+    for (let it = 0; it < 30; it++) {
+      let cnt = 0;
+      for (const s of custom) { forward(net, s.x, tc); backward(net, tc, s.y, G); cnt++; }
+      for (let j = 0; j < 12; j++) { const q = (Math.random() * n) | 0; forward(net, trainSet.X[q], tc); backward(net, tc, trainSet.Y[q], G); cnt++; }
+      sgd(net, G, V, 0.01, cnt);
+      if (it % 10 === 9) await tick();
+    }
+    enableTeach(true);
+    setInput(curX);
+  });
+  $('#teach').appendChild(b);
+}
+
+// Load external weights (JSON with the same keys: w1 b1 w2 b2 w3 b3 w4 b4)
+$('#wfile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text()); let ok = 0;
+    for (const k in net) if (j[k] && j[k].length === net[k].length) { net[k].set(j[k]); ok++; }
+    if (ok !== Object.keys(net).length) throw new Error('shape mismatch');
+    runToken++; trained = true; trainSet = trainSet || { X: [], Y: [] };
+    setStatus('Loaded weights from ' + f.name, 1); setInput(curX);
+  } catch (err) { setStatus('Could not load weights: ' + err.message, 0); }
+  e.target.value = '';
+});
+
+/* ---------- Panel fold ---------- */
+$('#fold').addEventListener('click', e => {
+  const b = $('#body'); b.hidden = !b.hidden;
+  e.currentTarget.innerHTML = b.hidden ? '+' : '&minus;';
+  e.currentTarget.setAttribute('aria-expanded', String(!b.hidden));
+});
+
+/* ---------- Boot ---------- */
+window.addEventListener('resize', resize);
+resize();
+if (cam.aspect < 1.2) dist = 30 * (1.4 / cam.aspect);
+placeCam();
+applyVis();
+(function loop() { renderer.render(scene, cam); requestAnimationFrame(loop); })();
+setInput(renderDigit(7, rng(5)));   // sample input until the user draws
+trainNet();
+</script>
+</body>
+</html>
