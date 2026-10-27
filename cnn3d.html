@@ -84,9 +84,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script>
-/* CNN-BEGIN -------------------------------------------------------------
-   28x28 -> conv5x5(4) -> pool2 -> conv5x5(8) -> pool2 -> fc(32) -> fc(10)
-   Plain Float32Array implementation with forward and backward passes. */
+
 const K1 = 4, K2 = 8, H = 32, NC = 10;
 
 function rng(seed) {
@@ -193,7 +191,7 @@ function forward(n, x, c) {
   for (let o = 0; o < NC; o++) c.p[o] /= sum;
   return c.p;
 }
-// Adds the gradient of -log p[label] into G. Returns the loss.
+
 function backward(n, c, label, G) {
   const M = K2 * 16;
   const dz = new Float32Array(NC), dh = new Float32Array(H);
@@ -264,13 +262,13 @@ function sgd(net, G, V, lr, bs) {
     }
   }
 }
-/* CNN-END ---------------------------------------------------------------- */
+
 
 const $ = s => document.querySelector(s);
 const tick = () => new Promise(r => setTimeout(r));
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-/* ---------- Image preprocessing (MNIST-style: fit in 20x20, centre by mass) ---------- */
+
 function preprocess(src) {
   const w = src.width, h = src.height;
   const sc = src.getContext('2d', { willReadFrequently: true });
@@ -309,7 +307,7 @@ function preprocess(src) {
   return out;
 }
 
-/* ---------- Synthetic digits (font-rendered, randomly distorted) ---------- */
+
 const FONTS = ['Arial', 'Helvetica', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana',
   'Trebuchet MS', 'Comic Sans MS', 'Tahoma', 'Palatino', 'Impact', 'sans-serif', 'serif', 'monospace', 'cursive'];
 const rcv = document.createElement('canvas'); rcv.width = rcv.height = 112;
@@ -336,11 +334,11 @@ function renderDigit(d, r) {
 let net = initNet(7), cache = newCache();
 let curX = new Float32Array(784);
 let trained = false, runToken = 0;
-const custom = [];          // user-labelled drawings
-let trainSet = null;        // { X, Y } kept for fine-tuning
+const custom = [];         
+let trainSet = null;        
 
-/* ---------- Layer layout ---------- */
-const U = 0.09; // world units per pixel
+
+const U = 0.09; 
 const LAYERS = [
   { id: 'input', name: 'Input',          maps: 1, size: 28, x: 0,    grid: [1, 1] },
   { id: 'conv1', name: 'Convolution 1',  maps: K1, size: 24, x: 6,   grid: [2, 2] },
@@ -441,7 +439,7 @@ LAYERS.forEach((L, li) => {
   group.add(title);
 });
 
-/* ---------- Connections ---------- */
+
 function makeLines(pairs) {
   const pos = new Float32Array(pairs.length * 6), col = new Float32Array(pairs.length * 6);
   pairs.forEach(([a, b], i) => pos.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6));
@@ -468,8 +466,8 @@ const conns = [
   { src: 1, dst: 2, set: makeLines(onePairs(1, 2)) },
   { src: 2, dst: 3, set: makeLines(allPairs(2, 3)) },
   { src: 3, dst: 4, set: makeLines(onePairs(3, 4)) },
-  { src: 4, dst: 5, set: makeLines(allPairs(4, 5)), weighted: true },   // index = map * H + unit
-  { src: 5, dst: 6, set: makeLines(allPairs(5, 6)), weighted: true }    // index = unit * NC + digit
+  { src: 4, dst: 5, set: makeLines(allPairs(4, 5)), weighted: true },   
+  { src: 5, dst: 6, set: makeLines(allPairs(5, 6)), weighted: true }    
 ];
 conns.forEach(c => { if (!c.weighted) paintStatic(c.set, 0.09, 0.13, 0.19); });
 
@@ -487,7 +485,7 @@ function paintWeighted(set, vals) {
   set.attr.needsUpdate = true;
 }
 
-/* ---------- Updating the visualisation ---------- */
+
 function paintLayer(L, data, fixedMax) {
   const n = L.size * L.size;
   let mx = fixedMax || 1e-6;
@@ -548,7 +546,7 @@ function setInput(x) {
   updateViz();
 }
 
-/* ---------- Camera controls ---------- */
+
 const dom = renderer.domElement;
 let dragging = false, lastX = 0, lastY = 0, panMode = false;
 dom.addEventListener('pointerdown', e => {
@@ -579,7 +577,7 @@ dom.addEventListener('wheel', e => {
   dist = clamp(dist * Math.exp(e.deltaY * 0.0012), 6, 90); placeCam();
 }, { passive: false });
 
-/* ---------- Hover tooltip ---------- */
+
 const tip = $('#tip'), ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
 function hover(e) {
   const r = dom.getBoundingClientRect();
@@ -605,7 +603,7 @@ function hover(e) {
   tip.style.top = (e.clientY + 14) + 'px';
 }
 
-/* ---------- Layer visibility ---------- */
+
 let connOn = true;
 function applyVis() {
   LAYERS.forEach(L => { L.group.visible = L.chk.checked; });
@@ -620,7 +618,7 @@ LAYERS.forEach(L => {
 });
 $('#conn').addEventListener('change', e => { connOn = e.target.checked; applyVis(); });
 
-/* ---------- Drawing canvas ---------- */
+
 const dc = $('#draw'), dctx = dc.getContext('2d', { willReadFrequently: true });
 function clearDraw() { dctx.fillStyle = '#000'; dctx.fillRect(0, 0, 280, 280); }
 clearDraw();
@@ -648,7 +646,7 @@ dc.addEventListener('pointerup', stopDraw);
 dc.addEventListener('pointercancel', stopDraw);
 $('#clear').addEventListener('click', () => { clearDraw(); setInput(null); });
 
-/* ---------- Training ---------- */
+
 function setStatus(t, p) {
   $('#status').textContent = t;
   if (p !== undefined) $('#prog').value = p;
@@ -713,7 +711,7 @@ async function trainNet() {
 }
 $('#retrain').addEventListener('click', () => { custom.length = 0; $('#taught').textContent = ''; trainNet(); });
 
-// Fine-tune on the user's own labelled drawings
+
 for (let d = 0; d < 10; d++) {
   const b = document.createElement('button');
   b.textContent = d; b.disabled = true;
@@ -736,7 +734,7 @@ for (let d = 0; d < 10; d++) {
   $('#teach').appendChild(b);
 }
 
-// Load external weights (JSON with the same keys: w1 b1 w2 b2 w3 b3 w4 b4)
+
 $('#wfile').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
@@ -749,14 +747,14 @@ $('#wfile').addEventListener('change', async e => {
   e.target.value = '';
 });
 
-/* ---------- Panel fold ---------- */
+
 $('#fold').addEventListener('click', e => {
   const b = $('#body'); b.hidden = !b.hidden;
   e.currentTarget.innerHTML = b.hidden ? '+' : '&minus;';
   e.currentTarget.setAttribute('aria-expanded', String(!b.hidden));
 });
 
-/* ---------- Boot ---------- */
+
 window.addEventListener('resize', resize);
 resize();
 if (cam.aspect < 1.2) dist = 30 * (1.4 / cam.aspect);
